@@ -119,17 +119,71 @@ export function translateStream(
             activeToolNames,
             activeToolCalls,
           })
-          // If upstream fails before any content starts, emitting a synthetic
-          // message_start without a matching final usage frame can trigger
-          // Claude Code's internal usage accounting crash during /compact.
-          // In that case, surface a plain SSE error event instead.
-          emit("error", {
-            type: "error",
-            error: {
-              type: err.kind === "rate_limit" ? "rate_limit_error" : "api_error",
-              message: err.message,
-            },
-          })
+          // If upstream fails before any content has been emitted, surface a
+          // SYNTHETIC complete assistant message containing the upstream error
+          // text. Emitting only an Anthropic `error` event leaves Claude Code's
+          // usage accumulator in an inconsistent state (it expects message_delta
+          // with usage stats), causing a `_.input_tokens` crash on the next
+          // /compact or context-aware operation. A complete shape (message_start
+          // → content_block_delta with error text → message_delta with zero
+          // usage → message_stop) keeps the client healthy AND surfaces the
+          // error as visible assistant text so the user can see what happened
+          // (e.g. "context window exceeded") and recover via /compact.
+          // For context-exhaustion errors, INFLATE the reported input_tokens
+          // to signal Claude Code that the conversation is near the model's
+          // declared context limit. Claude Code triggers auto-compact at ~95%
+          // of context_window. By reporting 950k input_tokens here, slots
+          // configured with `gpt-5.5[1m]` (1M context) see 95% pressure on the
+          // next turn and auto-compact instead of hitting the upstream limit
+          // again. Other error kinds (rate_limit, generic failed) report 0.
+          // (Rajiv directive 2026-04-26 20:29 — "lets try option a".)
+          const isContextOverflow =
+            err.kind === "failed" && /context window|context length|exceeds/i.test(err.message)
+          const inflatedInputTokens = isContextOverflow ? 950_000 : 0
+          if (!messageStarted) {
+            const errorText =
+              err.kind === "rate_limit"
+                ? `[upstream rate-limited] ${err.message}`
+                : `[upstream error] ${err.message}`
+            ensureMessageStart()
+            emit("content_block_start", {
+              type: "content_block_start",
+              index: 0,
+              content_block: { type: "text", text: "" },
+            })
+            emit("content_block_delta", {
+              type: "content_block_delta",
+              index: 0,
+              delta: { type: "text_delta", text: errorText },
+            })
+            emit("content_block_stop", { type: "content_block_stop", index: 0 })
+            emit("message_delta", {
+              type: "message_delta",
+              delta: { stop_reason: "end_turn", stop_sequence: null },
+              usage: {
+                input_tokens: inflatedInputTokens,
+                output_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+              },
+            })
+            emit("message_stop", { type: "message_stop" })
+          } else {
+            // Stream already started — close out the partial message gracefully
+            // with end_turn. Inflate input_tokens on context-overflow so the
+            // next turn triggers Claude Code's auto-compact threshold.
+            emit("message_delta", {
+              type: "message_delta",
+              delta: { stop_reason: "end_turn", stop_sequence: null },
+              usage: {
+                input_tokens: inflatedInputTokens,
+                output_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+              },
+            })
+            emit("message_stop", { type: "message_stop" })
+          }
         } else {
           opts.log.error("stream translation error", {
             err: String(err),

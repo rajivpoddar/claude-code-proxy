@@ -174,16 +174,66 @@ export function translateStream(
             activeToolNames,
             activeToolCalls,
           })
-          // Keep error-only streams as pure error events. Fabricating an empty
-          // message_start before the error can leave Claude Code without a
-          // final usage frame and trigger internal compact/accounting crashes.
-          emit("error", {
-            type: "error",
-            error: {
-              type: err.kind === "rate_limit" ? "rate_limit_error" : "api_error",
-              message: err.message,
-            },
-          })
+          // Surface upstream failures (e.g. context-window-exceeded) as a
+          // SYNTHETIC complete assistant message containing the error text.
+          // Emitting only an Anthropic `error` event leaves Claude Code's
+          // usage accumulator inconsistent (it expects message_delta with
+          // usage stats), causing a `_.input_tokens` crash on /compact or
+          // subsequent context-aware operations. A complete shape (message_start
+          // → content_block_delta with error text → message_delta with zero
+          // usage → message_stop) keeps the client healthy AND surfaces the
+          // error as visible assistant text so the user can see what happened
+          // and recover via /compact or input trim.
+          // For context-exhaustion errors, INFLATE input_tokens to signal
+          // Claude Code that the conversation is near the model's declared
+          // context limit → triggers auto-compact on next turn.
+          // (Rajiv directive 2026-04-26 20:29 — "lets try option a".)
+          const isContextOverflow =
+            err.kind === "failed" && /context window|context length|exceeds/i.test(err.message)
+          const inflatedInputTokens = isContextOverflow ? 950_000 : 0
+          if (!messageStarted) {
+            const errorText =
+              err.kind === "rate_limit"
+                ? `[upstream rate-limited] ${err.message}`
+                : `[upstream error] ${err.message}`
+            ensureMessageStart()
+            emit("content_block_start", {
+              type: "content_block_start",
+              index: 0,
+              content_block: { type: "text", text: "" },
+            })
+            emit("content_block_delta", {
+              type: "content_block_delta",
+              index: 0,
+              delta: { type: "text_delta", text: errorText },
+            })
+            emit("content_block_stop", { type: "content_block_stop", index: 0 })
+            emit("message_delta", {
+              type: "message_delta",
+              delta: { stop_reason: "end_turn", stop_sequence: null },
+              usage: {
+                input_tokens: inflatedInputTokens,
+                output_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+              },
+            })
+            emit("message_stop", { type: "message_stop" })
+          } else {
+            // Stream already started — close out with end_turn. Inflate
+            // input_tokens on context-overflow to trigger autocompact.
+            emit("message_delta", {
+              type: "message_delta",
+              delta: { stop_reason: "end_turn", stop_sequence: null },
+              usage: {
+                input_tokens: inflatedInputTokens,
+                output_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+              },
+            })
+            emit("message_stop", { type: "message_stop" })
+          }
         } else {
           opts.log.error("stream translation error", {
             err: String(err),

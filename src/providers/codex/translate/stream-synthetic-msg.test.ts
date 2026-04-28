@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test"
 import type { Logger } from "../../../log.ts"
 import { translateStream } from "./stream.ts"
-import { UpstreamStreamError } from "./reducer.ts"
 
 const noopLogger: Logger = {
   debug() {}, info() {}, warn() {}, error() {},
@@ -10,9 +9,14 @@ const noopLogger: Logger = {
 
 function upstreamWithFailedEvent(message: string): ReadableStream<Uint8Array> {
   // Emits a Codex `response.failed` event which the reducer throws as
-  // UpstreamStreamError (kind: "failed"). This triggers our synthetic-message
-  // recovery path — the very crash mode that was breaking GPT-5.5 slots when
-  // input exceeded the model's context window.
+  // UpstreamStreamError (kind: "failed"). This drives the synthetic-message
+  // recovery path in translateStream.
+  //
+  // Context-overflow errors are now intercepted upstream of translateStream
+  // (preflight tee in providers/codex/index.ts → HTTP 400 response) so the
+  // tests here cover transient/non-overflow failures only. Synthetic SSE
+  // recovery still runs to keep the client's usage accumulator consistent
+  // when an upstream chunk fails mid-flight.
   return new ReadableStream<Uint8Array>({
     start(controller) {
       const encoder = new TextEncoder()
@@ -38,7 +42,7 @@ async function collect(stream: ReadableStream<Uint8Array>): Promise<string> {
 
 test("translateStream emits synthetic complete message on pre-content UpstreamStreamError", async () => {
   const sse = await collect(
-    translateStream(upstreamWithFailedEvent("Your input exceeds the context window of this model."), {
+    translateStream(upstreamWithFailedEvent("transient backend hiccup, please retry"), {
       messageId: "msg_test",
       model: "gpt-5.5",
       log: noopLogger,
@@ -49,23 +53,28 @@ test("translateStream emits synthetic complete message on pre-content UpstreamSt
   expect(sse).toContain("event: message_start")
   expect(sse).toContain("event: content_block_delta")
   expect(sse).toContain("[upstream error]")
-  expect(sse).toContain("Your input exceeds the context window")
+  expect(sse).toContain("transient backend hiccup")
   expect(sse).toContain("event: message_delta")
   expect(sse).toContain("\"stop_reason\":\"end_turn\"")
   expect(sse).toContain("event: message_stop")
 })
 
-test("translateStream inflates input_tokens for context-overflow to trigger autocompact", async () => {
+test("translateStream reports zero input_tokens on upstream errors (no inflation)", async () => {
+  // After the HTTP 400 fix (PR: return-http-400-on-context-overflow), token
+  // inflation is no longer used to trigger reactive auto-compact. Reactive
+  // compact fires from the upstream HTTP 400 + invalid_request_error path
+  // instead. Synthetic SSE here always reports input_tokens:0.
   const sse = await collect(
-    translateStream(upstreamWithFailedEvent("Your input exceeds the context window of this model. Please adjust your input and try again."), {
+    translateStream(upstreamWithFailedEvent("Your input exceeds the context window of this model."), {
       messageId: "msg_test",
       model: "gpt-5.5",
       log: noopLogger,
     }),
   )
 
-  // Inflated input_tokens = 950000 (95% of 1M declared) → Claude Code auto-compacts on next turn
-  expect(sse).toContain("\"input_tokens\":950000")
+  expect(sse).toContain("\"input_tokens\":0")
+  expect(sse).not.toContain("950000")
+  expect(sse).not.toContain("990000")
 })
 
 test("translateStream does NOT inflate input_tokens for non-overflow upstream errors", async () => {
@@ -77,7 +86,6 @@ test("translateStream does NOT inflate input_tokens for non-overflow upstream er
     }),
   )
 
-  // Non-overflow errors keep input_tokens at 0 (no false autocompact trigger)
   expect(sse).toContain("\"input_tokens\":0")
-  expect(sse).not.toContain("\"input_tokens\":950000")
+  expect(sse).not.toContain("950000")
 })

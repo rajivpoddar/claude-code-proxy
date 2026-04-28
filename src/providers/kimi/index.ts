@@ -8,7 +8,7 @@ import {
 import { translateRequest } from "./translate/request.ts"
 import { translateStream } from "./translate/stream.ts"
 import { accumulateResponse, UpstreamStreamError } from "./translate/accumulate.ts"
-import { mapUsageToAnthropic } from "./translate/reducer.ts"
+import { mapUsageToAnthropic, reduceUpstream } from "./translate/reducer.ts"
 import { countTokens, countTranslatedTokens } from "./count-tokens.ts"
 import { KimiError, postKimi } from "./client.ts"
 import { runDeviceLogin } from "./auth/login.ts"
@@ -16,6 +16,32 @@ import { persistInitialTokens } from "./auth/manager.ts"
 import { loadAuth, clearAuth, authPath } from "./auth/token-store.ts"
 
 const VERBOSE = !!process.env.CCP_LOG_VERBOSE
+
+/**
+ * Same context-overflow → HTTP 400 reactive-compact contract as the codex
+ * provider. See providers/codex/index.ts for the full rationale: native
+ * Claude Code's `tryReactiveCompact` only fires on HTTP 400 (Anthropic) /
+ * HTTP 413 (Vertex) with body shape `invalid_request_error` containing the
+ * lowercase literal "prompt is too long". A 200 SSE stream — even with a
+ * synthetic stop_reason — is read as a normal model turn.
+ */
+const CONTEXT_OVERFLOW_PATTERN = /context window|context length|exceeds|prompt is too long|input.*too long/i
+
+function promptTooLongResponse(message: string): Response {
+  return new Response(
+    JSON.stringify({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: `prompt is too long: ${message}`,
+      },
+    }),
+    {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    },
+  )
+}
 
 function jsonError(status: number, type: string, message: string): Response {
   return new Response(JSON.stringify({ type: "error", error: { type, message } }), {
@@ -110,7 +136,60 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
   }
 
   if (wantStream) {
-    const stream = translateStream(upstream.body, {
+    // Preflight context-overflow detection — must happen BEFORE we commit the
+    // 200 SSE response headers. Tee the upstream body, run the reducer on one
+    // branch just far enough to surface a kimi `error`/finish event, and pass
+    // the other branch (still buffered from offset 0) to translateStream.
+    // See CONTEXT_OVERFLOW_PATTERN above for why HTTP 400 is required.
+    const [detectBranch, streamBranch] = upstream.body.tee()
+    let preflightError: UpstreamStreamError | null = null
+    {
+      const iter = reduceUpstream(detectBranch)
+      try {
+        await iter.next()
+      } catch (err) {
+        if (err instanceof UpstreamStreamError) {
+          preflightError = err
+        } else {
+          detectBranch.cancel().catch(() => {})
+          streamBranch.cancel().catch(() => {})
+          throw err
+        }
+      }
+      detectBranch.cancel().catch(() => {})
+    }
+
+    if (
+      preflightError &&
+      preflightError.kind === "failed" &&
+      CONTEXT_OVERFLOW_PATTERN.test(preflightError.message)
+    ) {
+      log.warn("preflight context overflow → 400", { message: preflightError.message })
+      streamBranch.cancel().catch(() => {})
+      return promptTooLongResponse(preflightError.message)
+    }
+
+    if (preflightError && preflightError.kind === "rate_limit") {
+      log.warn("preflight rate limit → 429", { message: preflightError.message })
+      streamBranch.cancel().catch(() => {})
+      const headers: Record<string, string> = { "content-type": "application/json" }
+      if (preflightError.retryAfterSeconds) {
+        headers["retry-after"] = String(preflightError.retryAfterSeconds)
+      }
+      return new Response(
+        JSON.stringify({
+          type: "error",
+          error: { type: "rate_limit_error", message: preflightError.message },
+        }),
+        { status: 429, headers },
+      )
+    }
+
+    // If preflight surfaced a non-overflow `kind:"failed"`, fall through to
+    // translateStream which will hit the same UpstreamStreamError on its own
+    // reduceUpstream pass and emit the existing SSE error/recovery shape.
+
+    const stream = translateStream(streamBranch, {
       messageId,
       model: body.model,
       log: ctx.childLogger("kimi.stream"),
@@ -164,6 +243,11 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
           }),
           { status: 429, headers },
         )
+      }
+      // Non-streaming context-overflow: same HTTP 400 path as streaming.
+      if (err.kind === "failed" && CONTEXT_OVERFLOW_PATTERN.test(err.message)) {
+        log.warn("non-stream context overflow → 400", { message: err.message })
+        return promptTooLongResponse(err.message)
       }
       return jsonError(502, "api_error", err.message)
     }

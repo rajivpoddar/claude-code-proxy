@@ -127,19 +127,15 @@ export function translateStream(
           // /compact or context-aware operation. A complete shape (message_start
           // → content_block_delta with error text → message_delta with zero
           // usage → message_stop) keeps the client healthy AND surfaces the
-          // error as visible assistant text so the user can see what happened
-          // (e.g. "context window exceeded") and recover via /compact.
-          // For context-exhaustion errors, INFLATE the reported input_tokens
-          // to signal Claude Code that the conversation is near the model's
-          // declared context limit. Claude Code triggers auto-compact at ~95%
-          // of context_window. By reporting 950k input_tokens here, slots
-          // configured with `gpt-5.5[1m]` (1M context) see 95% pressure on the
-          // next turn and auto-compact instead of hitting the upstream limit
-          // again. Other error kinds (rate_limit, generic failed) report 0.
-          // (Rajiv directive 2026-04-26 20:29 — "lets try option a".)
-          const isContextOverflow =
-            err.kind === "failed" && /context window|context length|exceeds/i.test(err.message)
-          const inflatedInputTokens = isContextOverflow ? 950_000 : 0
+          // error as visible assistant text so the user can see what happened.
+          //
+          // Note: context-overflow errors are intercepted upstream of this
+          // function (see preflight tee in providers/codex/index.ts) and
+          // returned as HTTP 400 invalid_request_error so reactive auto-compact
+          // fires. By the time we reach this catch, the error is some other
+          // upstream failure (rate-limit on a mid-stream chunk, transient
+          // failure, etc.). No input_tokens inflation — that path is replaced
+          // by the HTTP 400 preflight.
           if (!messageStarted) {
             const errorText =
               err.kind === "rate_limit"
@@ -161,7 +157,7 @@ export function translateStream(
               type: "message_delta",
               delta: { stop_reason: "end_turn", stop_sequence: null },
               usage: {
-                input_tokens: inflatedInputTokens,
+                input_tokens: 0,
                 output_tokens: 0,
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
@@ -169,14 +165,12 @@ export function translateStream(
             })
             emit("message_stop", { type: "message_stop" })
           } else {
-            // Stream already started — close out the partial message gracefully
-            // with end_turn. Inflate input_tokens on context-overflow so the
-            // next turn triggers Claude Code's auto-compact threshold.
+            // Stream already started — close out the partial message gracefully.
             emit("message_delta", {
               type: "message_delta",
               delta: { stop_reason: "end_turn", stop_sequence: null },
               usage: {
-                input_tokens: inflatedInputTokens,
+                input_tokens: 0,
                 output_tokens: 0,
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,

@@ -2,6 +2,12 @@ import { encodeSseEvent } from "../../../sse.ts"
 import type { Logger } from "../../../log.ts"
 import { mapUsageToAnthropic, reduceUpstream, UpstreamStreamError } from "./reducer.ts"
 
+// Mirrors CONTEXT_OVERFLOW_PATTERN in providers/codex/index.ts. Kept inline to
+// avoid an import cycle (index.ts → stream.ts → index.ts). If the upstream
+// constant changes, this must change too.
+const CONTEXT_OVERFLOW_PATTERN =
+  /context window|context length|exceeds|prompt is too long|input.*too long/i
+
 /**
  * Translate a Codex Responses SSE stream into Anthropic SSE events.
  * Returns a ReadableStream<Uint8Array> ready to pipe to the client.
@@ -119,23 +125,45 @@ export function translateStream(
             activeToolNames,
             activeToolCalls,
           })
-          // If upstream fails before any content has been emitted, surface a
-          // SYNTHETIC complete assistant message containing the upstream error
-          // text. Emitting only an Anthropic `error` event leaves Claude Code's
-          // usage accumulator in an inconsistent state (it expects message_delta
+          // Mid-stream context-overflow path. Preflight tee (providers/codex/
+          // index.ts) only consumes ONE upstream event. If overflow surfaces
+          // AFTER preflight (e.g., upstream emits some content then a
+          // `response.failed` with context-window error), HTTP 200 SSE has
+          // already been committed and we cannot return HTTP 400. Emitting a
+          // synthetic `end_turn` message_delta is wrong — Claude Code renders
+          // the error text as model output and reactive auto-compact never
+          // fires. Instead, emit an Anthropic-shaped `event: error` with
+          // type:"invalid_request_error" and the literal "prompt is too long"
+          // prefix, then `controller.error()` to terminate the stream as a
+          // protocol error. Claude Code's SSE parser surfaces `event: error`
+          // payloads through the same isApiErrorMessage path that HTTP 400
+          // uses, so tryReactiveCompact fires.
+          const isContextOverflow =
+            err.kind === "failed" && CONTEXT_OVERFLOW_PATTERN.test(err.message)
+          if (isContextOverflow) {
+            const errorPayload = {
+              type: "error" as const,
+              error: {
+                type: "invalid_request_error" as const,
+                message: `prompt is too long: ${err.message}`,
+              },
+            }
+            try {
+              emit("error", errorPayload)
+            } catch {
+              // controller may already be in an error state — ignore.
+            }
+            // Terminate the underlying ReadableStream with an Error so the
+            // HTTP response surfaces as a protocol error (not a clean close).
+            controller.error(new Error(`prompt is too long: ${err.message}`))
+            return
+          }
+          // Non-overflow upstream failure path. Surface a SYNTHETIC complete
+          // assistant message containing the upstream error text. Emitting
+          // only an Anthropic `error` event leaves Claude Code's usage
+          // accumulator in an inconsistent state (it expects message_delta
           // with usage stats), causing a `_.input_tokens` crash on the next
-          // /compact or context-aware operation. A complete shape (message_start
-          // → content_block_delta with error text → message_delta with zero
-          // usage → message_stop) keeps the client healthy AND surfaces the
-          // error as visible assistant text so the user can see what happened.
-          //
-          // Note: context-overflow errors are intercepted upstream of this
-          // function (see preflight tee in providers/codex/index.ts) and
-          // returned as HTTP 400 invalid_request_error so reactive auto-compact
-          // fires. By the time we reach this catch, the error is some other
-          // upstream failure (rate-limit on a mid-stream chunk, transient
-          // failure, etc.). No input_tokens inflation — that path is replaced
-          // by the HTTP 400 preflight.
+          // /compact or context-aware operation.
           if (!messageStarted) {
             const errorText =
               err.kind === "rate_limit"

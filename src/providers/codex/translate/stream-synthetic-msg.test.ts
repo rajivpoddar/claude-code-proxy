@@ -59,22 +59,44 @@ test("translateStream emits synthetic complete message on pre-content UpstreamSt
   expect(sse).toContain("event: message_stop")
 })
 
-test("translateStream reports zero input_tokens on upstream errors (no inflation)", async () => {
-  // After the HTTP 400 fix (PR: return-http-400-on-context-overflow), token
-  // inflation is no longer used to trigger reactive auto-compact. Reactive
-  // compact fires from the upstream HTTP 400 + invalid_request_error path
-  // instead. Synthetic SSE here always reports input_tokens:0.
-  const sse = await collect(
-    translateStream(upstreamWithFailedEvent("Your input exceeds the context window of this model."), {
-      messageId: "msg_test",
-      model: "gpt-5.5",
-      log: noopLogger,
-    }),
-  )
+test("translateStream emits event: error and controller.error on context-overflow (mid-stream)", async () => {
+  // Mid-stream overflow path: when preflight didn't catch the overflow (e.g.,
+  // upstream emitted some content then errored with a context-window message),
+  // translateStream must emit an Anthropic-shaped `event: error` with
+  // type:"invalid_request_error" + literal "prompt is too long" prefix and
+  // call controller.error() so Claude Code's tryReactiveCompact fires.
+  // Synthetic message-delta SSE renders as model output and never triggers
+  // reactive compact.
+  const upstream = upstreamWithFailedEvent("Your input exceeds the context window of this model.")
+  const stream = translateStream(upstream, {
+    messageId: "msg_test",
+    model: "gpt-5.5",
+    log: noopLogger,
+  })
+  const reader = stream.getReader()
+  const decoder = new TextDecoder()
+  let out = ""
+  let errored = false
+  let errorMessage = ""
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      out += decoder.decode(value, { stream: true })
+    }
+    out += decoder.decode()
+  } catch (err) {
+    errored = true
+    errorMessage = err instanceof Error ? err.message : String(err)
+  }
 
-  expect(sse).toContain("\"input_tokens\":0")
-  expect(sse).not.toContain("950000")
-  expect(sse).not.toContain("990000")
+  expect(out).toContain("event: error")
+  expect(out).toContain("invalid_request_error")
+  expect(out).toContain("prompt is too long")
+  expect(errored).toBe(true)
+  expect(errorMessage).toContain("prompt is too long")
+  // Synthetic graceful-close shape MUST NOT appear on the overflow path.
+  expect(out).not.toContain("\"stop_reason\":\"end_turn\"")
 })
 
 test("translateStream does NOT inflate input_tokens for non-overflow upstream errors", async () => {

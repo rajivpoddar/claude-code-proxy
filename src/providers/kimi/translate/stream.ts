@@ -3,6 +3,11 @@ import type { Logger } from "../../../log.ts"
 import { mapUsageToAnthropic, reduceUpstream, UpstreamStreamError, type KimiUsage } from "./reducer.ts"
 import { makeThinkingSignature } from "./signature.ts"
 
+// Mirrors CONTEXT_OVERFLOW_PATTERN in providers/kimi/index.ts. Inline to avoid
+// an import cycle. If the upstream constant changes, this must change too.
+const CONTEXT_OVERFLOW_PATTERN =
+  /context window|context length|exceeds|prompt is too long|input.*too long/i
+
 function isAbortError(err: unknown): boolean {
   return err instanceof Error && err.name === "AbortError"
 }
@@ -174,23 +179,35 @@ export function translateStream(
             activeToolNames,
             activeToolCalls,
           })
-          // Surface upstream failures (e.g. context-window-exceeded) as a
-          // SYNTHETIC complete assistant message containing the error text.
-          // Emitting only an Anthropic `error` event leaves Claude Code's
-          // usage accumulator inconsistent (it expects message_delta with
-          // usage stats), causing a `_.input_tokens` crash on /compact or
-          // subsequent context-aware operations. A complete shape (message_start
-          // → content_block_delta with error text → message_delta with zero
-          // usage → message_stop) keeps the client healthy AND surfaces the
-          // error as visible assistant text so the user can see what happened
-          // and recover via /compact or input trim.
-          // For context-exhaustion errors, INFLATE input_tokens to signal
-          // Claude Code that the conversation is near the model's declared
-          // context limit → triggers auto-compact on next turn.
-          // (Rajiv directive 2026-04-26 20:29 — "lets try option a".)
+          // Mid-stream context-overflow path. Preflight tee in providers/kimi/
+          // index.ts returns HTTP 400 invalid_request_error before SSE headers
+          // commit. If overflow surfaces AFTER preflight, HTTP 200 SSE is
+          // already on the wire. Emit an Anthropic-shaped `event: error` with
+          // type:"invalid_request_error" + literal "prompt is too long"
+          // prefix, then `controller.error()` to terminate as a protocol
+          // error. Claude Code's SSE parser surfaces `event: error` through
+          // isApiErrorMessage → tryReactiveCompact fires. The earlier
+          // input-token-inflation approach (950k synthetic tokens) does NOT
+          // trigger reactive compact and renders the error as model output.
           const isContextOverflow =
-            err.kind === "failed" && /context window|context length|exceeds/i.test(err.message)
-          const inflatedInputTokens = isContextOverflow ? 950_000 : 0
+            err.kind === "failed" && CONTEXT_OVERFLOW_PATTERN.test(err.message)
+          if (isContextOverflow) {
+            const errorPayload = {
+              type: "error" as const,
+              error: {
+                type: "invalid_request_error" as const,
+                message: `prompt is too long: ${err.message}`,
+              },
+            }
+            try {
+              emit("error", errorPayload)
+            } catch {
+              // controller may already be in an error state — ignore.
+            }
+            controller.error(new Error(`prompt is too long: ${err.message}`))
+            return
+          }
+          const inflatedInputTokens = 0
           if (!messageStarted) {
             const errorText =
               err.kind === "rate_limit"

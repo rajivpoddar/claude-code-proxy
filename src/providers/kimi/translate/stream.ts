@@ -257,9 +257,64 @@ export function translateStream(
             activeToolNames,
             activeToolCalls,
           })
+          // Non-UpstreamStreamError catch path — covers parse errors,
+          // unexpected throws from reduceUpstream, and socket-closed errors
+          // that aren't AbortError. Emitting ONLY a bare `event: error`
+          // leaves Claude Code's usage accumulator inconsistent (it expects
+          // message_delta with usage stats), causing a `_.input_tokens`
+          // crash on the next /compact or context-aware operation. Mirror
+          // the UpstreamStreamError synthetic-recovery shape so the client
+          // sees a complete assistant message before the trailing error.
+          const errorMessage = String(err)
+          if (!messageStarted) {
+            ensureMessageStart()
+            emit("content_block_start", {
+              type: "content_block_start",
+              index: 0,
+              content_block: { type: "text", text: "" },
+            })
+            emit("content_block_delta", {
+              type: "content_block_delta",
+              index: 0,
+              delta: {
+                type: "text_delta",
+                text: `[upstream stream error] ${errorMessage}`,
+              },
+            })
+            emit("content_block_stop", { type: "content_block_stop", index: 0 })
+            emit("message_delta", {
+              type: "message_delta",
+              delta: { stop_reason: "end_turn", stop_sequence: null },
+              usage: {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+              },
+            })
+            emit("message_stop", { type: "message_stop" })
+          } else {
+            // Stream already started — close out the partial message
+            // gracefully with zero usage so the client accumulator stays
+            // consistent.
+            emit("message_delta", {
+              type: "message_delta",
+              delta: { stop_reason: "end_turn", stop_sequence: null },
+              usage: {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+              },
+            })
+            emit("message_stop", { type: "message_stop" })
+          }
+          // Trailing error event after the complete synthetic message —
+          // surfaces the failure without corrupting the client's usage
+          // accumulator state.
           emit("error", {
             type: "error",
-            error: { type: "api_error", message: String(err) },
+            error: { type: "api_error", message: errorMessage },
           })
         }
       } finally {

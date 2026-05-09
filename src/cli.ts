@@ -1,6 +1,10 @@
 #!/usr/bin/env bun
 import { startServer } from "./server.ts"
 import { createLogger, logDir } from "./log.ts"
+import { port as configPort, getConfig } from "./config.ts"
+import { configDir } from "./paths.ts"
+import { existsSync } from "node:fs"
+import { join } from "node:path"
 import {
   allProviders,
   allSupportedModels,
@@ -24,10 +28,11 @@ async function main() {
   }
 
   if (!first || first === "serve") {
-    const port = Number(process.env.PORT ?? 18765)
+    const port = configPort()
     startServer({ port })
     console.log(`Proxy listening on http://localhost:${port}`)
     console.log(`Logs: ${logDir()}/proxy.log`)
+    printConfigSummary()
     console.log()
     console.log("Providers are selected per-request by ANTHROPIC_MODEL:")
     for (const p of allProviders()) {
@@ -89,7 +94,7 @@ function usageAndExit(): never {
     .map((m) => `${m.model} (${m.provider})`)
     .join(", ")
   console.log(`Usage:
-  claude-code-proxy serve                      Run proxy (PORT env, default 18765)
+  claude-code-proxy serve                      Run proxy (PORT env or config.json port, default 18765)
                                                Upstream is chosen per-request from ANTHROPIC_MODEL.
   claude-code-proxy <provider> auth login      Browser OAuth
   claude-code-proxy <provider> auth device     Device-code OAuth
@@ -101,6 +106,58 @@ Providers: ${providers}
 Models:    ${models}
 `)
   process.exit(2)
+}
+
+function printConfigSummary(): void {
+  const cfg = getConfig()
+  const fromFile = cfg.file
+  const overrides: string[] = []
+
+  const configPath = join(configDir(), "config.json")
+  if (existsSync(configPath)) {
+    console.log(`Config: ${configPath}`)
+  }
+
+  if (cfg.env.CCP_CODEX_ORIGINATOR) overrides.push("CCP_CODEX_ORIGINATOR (env)")
+  else if (fromFile.codex?.originator) overrides.push("codex.originator (config)")
+
+  if (cfg.env.CCP_CODEX_USER_AGENT) overrides.push("CCP_CODEX_USER_AGENT (env)")
+  else if (cfg.env.CCP_USER_AGENT) overrides.push("CCP_USER_AGENT (env)")
+  else if (fromFile.codex?.userAgent) overrides.push("codex.userAgent (config)")
+
+  if (cfg.env.CCP_KIMI_USER_AGENT) overrides.push("CCP_KIMI_USER_AGENT (env)")
+  else if (fromFile.kimi?.userAgent) overrides.push("kimi.userAgent (config)")
+
+  if (cfg.env.CCP_CODEX_MODEL) overrides.push("CCP_CODEX_MODEL (env)")
+  else if (fromFile.codex?.model) overrides.push("codex.model (config)")
+
+  if (cfg.env.CCP_CODEX_EFFORT) overrides.push("CCP_CODEX_EFFORT (env)")
+  else if (fromFile.codex?.effort) overrides.push("codex.effort (config)")
+
+  if (cfg.env.CCP_CODEX_SERVICE_TIER) overrides.push("CCP_CODEX_SERVICE_TIER (env)")
+  else if (fromFile.codex?.serviceTier) overrides.push("codex.serviceTier (config)")
+
+  if (cfg.env.CCP_CODEX_BASE_URL) overrides.push("CCP_CODEX_BASE_URL (env)")
+  else if (fromFile.codex?.baseUrl) overrides.push("codex.baseUrl (config)")
+
+  if (cfg.env.CCP_LOG_VERBOSE !== undefined) overrides.push("CCP_LOG_VERBOSE (env)")
+  else if (fromFile.log?.verbose) overrides.push("log.verbose (config)")
+
+  if (cfg.env.CCP_LOG_STDERR !== undefined) overrides.push("CCP_LOG_STDERR (env)")
+  else if (fromFile.log?.stderr) overrides.push("log.stderr (config)")
+
+  if (cfg.env.CCP_KIMI_OAUTH_HOST) overrides.push("CCP_KIMI_OAUTH_HOST (env)")
+  else if (fromFile.kimi?.oauthHost) overrides.push("kimi.oauthHost (config)")
+
+  if (cfg.env.CCP_KIMI_BASE_URL) overrides.push("CCP_KIMI_BASE_URL (env)")
+  else if (fromFile.kimi?.baseUrl) overrides.push("kimi.baseUrl (config)")
+
+  if (overrides.length > 0) {
+    console.log("Overrides:")
+    for (const o of overrides) {
+      console.log(`  ${o}`)
+    }
+  }
 }
 
 main().catch((err) => {

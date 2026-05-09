@@ -88,7 +88,7 @@ upstream for each request is chosen from `ANTHROPIC_MODEL`.
 
 `ANTHROPIC_MODEL` selects the provider:
 
-- `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.4-mini`, `gpt-5.2` → **codex**
+- `gpt-5.5`, `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.4-mini`, `gpt-5.2` → **codex**
 - `kimi-for-coding`, `kimi-k2.6`, `k2.6` → **kimi**
 
 An unknown model returns a 400 listing the supported ids. There is no
@@ -107,6 +107,7 @@ ANTHROPIC_AUTH_TOKEN=unused \
 ANTHROPIC_MODEL=gpt-5.4[1m] \
 ANTHROPIC_SMALL_FAST_MODEL=gpt-5.4-mini[1m] \
 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1 \
   claude
 
 # Kimi
@@ -115,8 +116,15 @@ ANTHROPIC_AUTH_TOKEN=unused \
 ANTHROPIC_MODEL=kimi-for-coding[1m] \
 ANTHROPIC_SMALL_FAST_MODEL=kimi-for-coding[1m] \
 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1 \
   claude
 ```
+
+`CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1` is recommended because the
+proxy always talks to upstream providers with streaming requests, even when it
+accumulates a non-streaming Anthropic response for Claude Code. Disabling Claude
+Code's streaming-to-non-streaming fallback avoids retrying a partially completed
+stream in a way that can duplicate tool calls.
 
 Or set it persistently in `~/.claude/settings.json`:
 
@@ -127,7 +135,8 @@ Or set it persistently in `~/.claude/settings.json`:
     "ANTHROPIC_AUTH_TOKEN": "unused",
     "ANTHROPIC_MODEL": "gpt-5.4[1m]",
     "ANTHROPIC_SMALL_FAST_MODEL": "gpt-5.4-mini[1m]",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1,
+    "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": 1
   }
 }
 ```
@@ -169,6 +178,7 @@ if [ -f "$HOME/.claude/claude-code-proxy-enabled" ]; then
     export ANTHROPIC_MODEL="gpt-5.4[1m]"
     export ANTHROPIC_SMALL_FAST_MODEL="gpt-5.4-mini[1m]"
     export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"
+    export CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK="1"
 fi
 
 exec "$HOME/.local/bin/claude" "$@"
@@ -207,6 +217,11 @@ the change immediately; existing sessions keep whatever they started with.
 Upstream: `https://chatgpt.com/backend-api/codex/responses` (Responses API).
 
 Set `ANTHROPIC_MODEL` to a model your ChatGPT subscription is allowed to use.
+Append `-fast` to a Codex model name to request Codex fast mode for that request
+without restarting the proxy. For example, `gpt-5.4-fast[1m]` is sent upstream as
+model `gpt-5.4` with `service_tier: "priority"`. An explicit
+`codex.serviceTier` / `CCP_CODEX_SERVICE_TIER` override still takes precedence.
+
 Confirmed working on **Plus**:
 
 - `gpt-5.4`
@@ -427,30 +442,78 @@ The proxy speaks enough of the Anthropic API for Claude Code:
 
 ## Configuration
 
-Settings are environment variables on the proxy process, not a config file.
+Settings can come from either environment variables or a `config.json` file.
+Precedence per setting: **env var > config file > built-in default**. The
+config file is optional — env-var-only setups continue to work unchanged.
 
-| Variable          | Default                          | Purpose                                            |
-| ----------------- | -------------------------------- | -------------------------------------------------- |
-| `PORT`            | `18765`                          | Proxy listen port                                  |
-| `XDG_STATE_HOME`  | `~/.local/state`                 | Base dir for `proxy.log`                           |
-| `CCP_LOG_STDERR`  | unset                            | Also mirror log lines to stderr                    |
-| `CCP_LOG_VERBOSE` | unset                            | Log full request/response bodies + every SSE event |
-| `KIMI_OAUTH_HOST` | `https://auth.kimi.com`          | Override Kimi's OAuth host (debugging only)        |
-| `KIMI_BASE_URL`   | `https://api.kimi.com/coding/v1` | Override Kimi's API base URL                       |
-| `CCP_CODEX_MODEL` | unset                            | Force all Codex requests to this model (`gpt-5.2`, `gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-mini`) |
-| `CCP_CODEX_EFFORT`| unset                            | Force all Codex requests to this reasoning effort (`none`, `low`, `medium`, `high`, `xhigh`) |
+The file lives at `~/.config/claude-code-proxy/config.json` on macOS (the same
+directory the auth tokens use, deliberately not `~/Library`) and at
+`${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/config.json` elsewhere.
+
+```json
+{
+  "port": 18765,
+  "codex": {
+    "originator": "claude-code-proxy",
+    "userAgent": "claude-code-proxy/dev",
+    "model": "gpt-5.4",
+    "effort": "medium",
+    "serviceTier": "fast",
+    "baseUrl": "https://chatgpt.com/backend-api/codex/responses"
+  },
+  "kimi": {
+    "userAgent": "KimiCLI/1.37.0",
+    "oauthHost": "https://auth.kimi.com",
+    "baseUrl": "https://api.kimi.com/coding/v1"
+  },
+  "log": {
+    "stderr": false,
+    "verbose": false
+  }
+}
+```
+
+| Variable                 | Config key          | Default                                           | Purpose                                                                                                          |
+| ------------------------ | ------------------- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `PORT`                   | `port`              | `18765`                                           | Proxy listen port                                                                                                |
+| `XDG_STATE_HOME`         | —                   | `~/.local/state`                                  | Base dir for `proxy.log`                                                                                         |
+| `CCP_LOG_STDERR`         | `log.stderr`        | unset                                             | Also mirror log lines to stderr                                                                                  |
+| `CCP_LOG_VERBOSE`        | `log.verbose`       | unset                                             | Log full request/response bodies + every SSE event                                                               |
+| `CCP_KIMI_OAUTH_HOST`    | `kimi.oauthHost`    | `https://auth.kimi.com`                           | Override Kimi's OAuth host (debugging only)                                                                      |
+| `CCP_KIMI_BASE_URL`      | `kimi.baseUrl`      | `https://api.kimi.com/coding/v1`                  | Override Kimi's API base URL                                                                                     |
+| `CCP_CODEX_MODEL`        | `codex.model`       | unset                                             | Force all Codex requests to this model (`gpt-5.2`, `gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`)        |
+| `CCP_CODEX_EFFORT`       | `codex.effort`      | unset                                             | Force all Codex requests to this reasoning effort (`none`, `low`, `medium`, `high`, `xhigh`)                     |
+| `CCP_CODEX_SERVICE_TIER` | `codex.serviceTier` | unset                                             | Force all Codex requests to this service tier (`fast`/`priority`, `flex`; `fast` is sent upstream as `priority`) |
+| `CCP_CODEX_BASE_URL`     | `codex.baseUrl`     | `https://chatgpt.com/backend-api/codex/responses` | Override the Codex Responses endpoint                                                                            |
+| `CCP_CODEX_ORIGINATOR`   | `codex.originator`  | `claude-code-proxy`                               | Override the `originator` header sent to Codex                                                                   |
+| `CCP_CODEX_USER_AGENT`   | `codex.userAgent`   | `claude-code-proxy/<version>`                     | Override the `User-Agent` header sent to Codex                                                                   |
+| `CCP_KIMI_USER_AGENT`    | `kimi.userAgent`    | `KimiCLI/1.37.0`                                  | Override the `User-Agent` header sent to Kimi                                                                    |
+| `CCP_ORIGINATOR`         | —                   | `claude-code-proxy`                               | Fallback for `CCP_CODEX_ORIGINATOR`                                                                              |
+| `CCP_USER_AGENT`         | —                   | unset                                             | Fallback for `CCP_CODEX_USER_AGENT` and `CCP_KIMI_USER_AGENT`                                                    |
+
+A malformed `config.json` is reported on stderr and ignored; defaults are used
+in its place. Invalid types for individual keys are warned and skipped without
+affecting other keys.
 
 ### Files
 
 - `$XDG_STATE_HOME/claude-code-proxy/proxy.log` — JSON-lines log, rotated at 20
   MiB. Secrets (`authorization`, `access`, `refresh`, `id_token`,
   `ChatGPT-Account-Id`, …) are redacted before write.
-- `~/.config/claude-code-proxy/codex/auth.json` — codex tokens (non-macOS; macOS
-  uses Keychain under service `claude-code-proxy.codex`).
-- `~/.config/claude-code-proxy/kimi/auth.json` — kimi tokens (non-macOS; macOS
-  uses Keychain under service `claude-code-proxy.kimi`).
-- `~/.config/claude-code-proxy/kimi/device_id` — persistent UUID bound into the
-  Kimi JWT at login. Reused for the lifetime of the install.
+- `~/.config/claude-code-proxy/config.json` (macOS) or
+  `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/config.json` — optional
+  configuration file (see table above).
+- `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/codex/auth.json` — codex
+  tokens (non-macOS; macOS uses Keychain under service
+  `claude-code-proxy.codex`). Pre-existing files at the legacy path
+  `~/.config/claude-code-proxy/codex/auth.json` are read as a fallback so
+  existing logins survive setting `XDG_CONFIG_HOME`.
+- `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/kimi/auth.json` — kimi
+  tokens (non-macOS; macOS uses Keychain under service
+  `claude-code-proxy.kimi`). Same legacy-path fallback as above.
+- `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/kimi/device_id` —
+  persistent UUID bound into the Kimi JWT at login. Reused for the lifetime
+  of the install.
 
 ## Limitations
 

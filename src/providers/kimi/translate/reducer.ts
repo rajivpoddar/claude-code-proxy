@@ -1,6 +1,5 @@
 import { parseSseStream } from "../../../sse.ts"
-
-const VERBOSE = !!process.env.CCP_LOG_VERBOSE
+import type { Logger } from "../../../log.ts"
 
 export class UpstreamStreamError extends Error {
   constructor(
@@ -73,6 +72,7 @@ export interface ReducerStats {
 export async function* reduceUpstream(
   upstream: ReadableStream<Uint8Array>,
   stats?: ReducerStats,
+  log?: Logger,
 ): AsyncGenerator<ReducerEvent> {
   let nextBlockIndex = 0
   let thinkingIndex: number | undefined
@@ -112,7 +112,8 @@ export async function* reduceUpstream(
     let chunk: StreamChunk
     try {
       chunk = JSON.parse(data) as StreamChunk
-    } catch {
+    } catch (err) {
+      log?.warn("upstream sse: invalid json", { err: String(err), preview: data.slice(0, 200) })
       continue
     }
 

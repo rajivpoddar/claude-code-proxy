@@ -207,50 +207,21 @@ export function translateStream(
             controller.error(new Error(`prompt is too long: ${err.message}`))
             return
           }
-          const inflatedInputTokens = 0
-          if (!messageStarted) {
-            const errorText =
-              err.kind === "rate_limit"
-                ? `[upstream rate-limited] ${err.message}`
-                : `[upstream error] ${err.message}`
-            ensureMessageStart()
-            emit("content_block_start", {
-              type: "content_block_start",
-              index: 0,
-              content_block: { type: "text", text: "" },
-            })
-            emit("content_block_delta", {
-              type: "content_block_delta",
-              index: 0,
-              delta: { type: "text_delta", text: errorText },
-            })
-            emit("content_block_stop", { type: "content_block_stop", index: 0 })
-            emit("message_delta", {
-              type: "message_delta",
-              delta: { stop_reason: "end_turn", stop_sequence: null },
-              usage: {
-                input_tokens: inflatedInputTokens,
-                output_tokens: 0,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-              },
-            })
-            emit("message_stop", { type: "message_stop" })
-          } else {
-            // Stream already started — close out with end_turn. Inflate
-            // input_tokens on context-overflow to trigger autocompact.
-            emit("message_delta", {
-              type: "message_delta",
-              delta: { stop_reason: "end_turn", stop_sequence: null },
-              usage: {
-                input_tokens: inflatedInputTokens,
-                output_tokens: 0,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-              },
-            })
-            emit("message_stop", { type: "message_stop" })
-          }
+          // Non-overflow upstream failure path. Per upstream PR #1 (strict
+          // error shape) and Rajiv directive 2026-05-09 12:49 IST, emit ONLY
+          // an Anthropic `event: error` — no synthetic message wrapper.
+          // Tradeoff documented in feedback_raine_strict_error_shape_dropped_synthetic_recovery.md.
+          const errorText =
+            err.kind === "rate_limit"
+              ? `[upstream rate-limited] ${err.message}`
+              : `[upstream error] ${err.message}`
+          emit("error", {
+            type: "error",
+            error: {
+              type: err.kind === "rate_limit" ? "rate_limit_error" : "api_error",
+              message: errorText,
+            },
+          })
         } else {
           opts.log.error("stream translation error", {
             err: String(err),
@@ -259,59 +230,10 @@ export function translateStream(
           })
           // Non-UpstreamStreamError catch path — covers parse errors,
           // unexpected throws from reduceUpstream, and socket-closed errors
-          // that aren't AbortError. Emitting ONLY a bare `event: error`
-          // leaves Claude Code's usage accumulator inconsistent (it expects
-          // message_delta with usage stats), causing a `_.input_tokens`
-          // crash on the next /compact or context-aware operation. Mirror
-          // the UpstreamStreamError synthetic-recovery shape so the client
-          // sees a complete assistant message before the trailing error.
+          // that aren't AbortError. Per upstream PR #1 strict shape (Rajiv
+          // 2026-05-09 12:49 IST), emit ONLY `event: error` — no synthetic
+          // message wrapper.
           const errorMessage = String(err)
-          if (!messageStarted) {
-            ensureMessageStart()
-            emit("content_block_start", {
-              type: "content_block_start",
-              index: 0,
-              content_block: { type: "text", text: "" },
-            })
-            emit("content_block_delta", {
-              type: "content_block_delta",
-              index: 0,
-              delta: {
-                type: "text_delta",
-                text: `[upstream stream error] ${errorMessage}`,
-              },
-            })
-            emit("content_block_stop", { type: "content_block_stop", index: 0 })
-            emit("message_delta", {
-              type: "message_delta",
-              delta: { stop_reason: "end_turn", stop_sequence: null },
-              usage: {
-                input_tokens: 0,
-                output_tokens: 0,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-              },
-            })
-            emit("message_stop", { type: "message_stop" })
-          } else {
-            // Stream already started — close out the partial message
-            // gracefully with zero usage so the client accumulator stays
-            // consistent.
-            emit("message_delta", {
-              type: "message_delta",
-              delta: { stop_reason: "end_turn", stop_sequence: null },
-              usage: {
-                input_tokens: 0,
-                output_tokens: 0,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-              },
-            })
-            emit("message_stop", { type: "message_stop" })
-          }
-          // Trailing error event after the complete synthetic message —
-          // surfaces the failure without corrupting the client's usage
-          // accumulator state.
           emit("error", {
             type: "error",
             error: { type: "api_error", message: errorMessage },

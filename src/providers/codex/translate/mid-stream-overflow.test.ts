@@ -159,10 +159,12 @@ describe("translateStream mid-stream context-overflow", () => {
     expect(errorMessage ?? "").toContain("prompt is too long")
   })
 
-  test("non-overflow upstream errors still take the synthetic graceful path", async () => {
+  test("non-overflow upstream errors emit event: error (strict upstream shape)", async () => {
     // Simulate a transient upstream failure mid-stream (no context-overflow
-    // keywords). Should fall through to the existing synthetic message_delta
-    // graceful close.
+    // keywords). Per upstream PR #1 strict shape (Rajiv 2026-05-09 12:49 IST),
+    // emits `event: error` with api_error — no synthetic graceful end_turn
+    // message_delta. Tradeoff documented in
+    // feedback_raine_strict_error_shape_dropped_synthetic_recovery.md.
     const upstream = new ReadableStream<Uint8Array>({
       start(controller) {
         const created = {
@@ -211,11 +213,16 @@ describe("translateStream mid-stream context-overflow", () => {
       }),
     )
 
-    // Synthetic graceful close path — message_delta with end_turn + clean
-    // close (no controller.error).
-    expect(sse).toContain('"stop_reason":"end_turn"')
-    expect(sse).toContain("event: message_stop")
+    // Strict upstream shape — emit event: error with api_error type. Stream
+    // closes cleanly (no controller.error) because non-overflow errors are
+    // not protocol errors.
+    expect(sse).toContain("event: error")
+    expect(sse).toContain('"type":"api_error"')
+    expect(sse).toContain("transient backend error")
     expect(errored).toBe(false)
+    // Must NOT emit synthetic message_delta with end_turn — that was the
+    // dropped synthetic-recovery path.
+    expect(sse).not.toContain('"stop_reason":"end_turn"')
     // Must NOT carry the prompt-is-too-long literal — that's the overflow
     // branch only.
     expect(sse).not.toContain("prompt is too long")

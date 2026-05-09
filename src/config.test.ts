@@ -40,7 +40,7 @@ afterEach(() => {
 describe("config defaults", () => {
   it("returns built-in defaults when no env and no file", () => {
     setEnv({})
-    expect(port()).toBe(18765)
+    expect(port()).toBe(19080)
     expect(codexOriginator("default-orig")).toBe("default-orig")
     expect(codexUserAgent("default-ua")).toBe("default-ua")
     expect(codexModel()).toBeUndefined()
@@ -200,7 +200,7 @@ describe("malformed config", () => {
   it("returns defaults when JSON is invalid", () => {
     writeFileSync(configPath, "{not valid json")
     setEnv({})
-    expect(port()).toBe(18765)
+    expect(port()).toBe(19080)
   })
 
   it("ignores wrong-typed values with a warning, keeps other valid ones", () => {
@@ -209,12 +209,12 @@ describe("malformed config", () => {
       JSON.stringify({ port: "not-a-number", codex: { userAgent: "good" } }),
     )
     setEnv({})
-    expect(port()).toBe(18765)
+    expect(port()).toBe(19080)
     expect(codexUserAgent("default")).toBe("good")
   })
 
   it("returns defaults when file is missing entirely", () => {
     setEnv({})
-    expect(port()).toBe(18765)
+    expect(port()).toBe(19080)
   })
 })

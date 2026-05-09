@@ -155,9 +155,14 @@ export function getConfig(): LoadedConfig {
 
 // Per-setting getters. Each encodes its precedence chain explicitly.
 
-// Preserves legacy `Number(process.env.PORT ?? 18765)` semantics: an env-set
-// PORT of empty string parsed to NaN under the old code (effectively broken),
-// so we treat it as unset rather than returning NaN.
+// Default port aligned with HeyDonna slot 1 launcher
+// (see ~/Downloads/projects/heydonna-app/.claude/scripts/launch-slot-lib.sh:99-100 —
+// slot 1 hard-codes ANTHROPIC_BASE_URL=http://127.0.0.1:19080).
+// Per Rajiv directive 2026-05-09 13:01 IST.
+//
+// Preserves legacy semantics: an env-set PORT of empty string parsed to NaN
+// under the old code (effectively broken), so we treat it as unset rather
+// than returning NaN.
 export function port(): number {
   const c = getConfig()
   const envPort = c.env.PORT
@@ -165,7 +170,7 @@ export function port(): number {
     const n = Number(envPort)
     if (Number.isFinite(n)) return n
   }
-  return c.file.port ?? 18765
+  return c.file.port ?? 19080
 }
 
 export function codexOriginator(defaultValue: string): string {

@@ -77,7 +77,7 @@ claude-code-proxy kimi auth status
 ### 3. Start the proxy
 
 ```sh
-claude-code-proxy serve                # listens on 127.0.0.1:18765
+claude-code-proxy serve                # listens on 127.0.0.1:19080
 PORT=11435 claude-code-proxy serve     # change the listen port
 ```
 
@@ -102,7 +102,7 @@ would 400 because no provider claims it, so set
 
 ```sh
 # Codex
-ANTHROPIC_BASE_URL=http://localhost:18765 \
+ANTHROPIC_BASE_URL=http://localhost:19080 \
 ANTHROPIC_AUTH_TOKEN=unused \
 ANTHROPIC_MODEL=gpt-5.4[1m] \
 ANTHROPIC_SMALL_FAST_MODEL=gpt-5.4-mini[1m] \
@@ -111,7 +111,7 @@ CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1 \
   claude
 
 # Kimi
-ANTHROPIC_BASE_URL=http://localhost:18765 \
+ANTHROPIC_BASE_URL=http://localhost:19080 \
 ANTHROPIC_AUTH_TOKEN=unused \
 ANTHROPIC_MODEL=kimi-for-coding[1m] \
 ANTHROPIC_SMALL_FAST_MODEL=kimi-for-coding[1m] \
@@ -131,7 +131,7 @@ Or set it persistently in `~/.claude/settings.json`:
 ```json
 {
   "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:18765",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:19080",
     "ANTHROPIC_AUTH_TOKEN": "unused",
     "ANTHROPIC_MODEL": "gpt-5.4[1m]",
     "ANTHROPIC_SMALL_FAST_MODEL": "gpt-5.4-mini[1m]",
@@ -173,7 +173,7 @@ the default.
 # Active when ~/.claude/claude-code-proxy-enabled exists.
 
 if [ -f "$HOME/.claude/claude-code-proxy-enabled" ]; then
-    export ANTHROPIC_BASE_URL="http://localhost:18765"
+    export ANTHROPIC_BASE_URL="http://localhost:19080"
     export ANTHROPIC_AUTH_TOKEN="unused"
     export ANTHROPIC_MODEL="gpt-5.4[1m]"
     export ANTHROPIC_SMALL_FAST_MODEL="gpt-5.4-mini[1m]"
@@ -452,7 +452,7 @@ directory the auth tokens use, deliberately not `~/Library`) and at
 
 ```json
 {
-  "port": 18765,
+  "port": 19080,
   "codex": {
     "originator": "claude-code-proxy",
     "userAgent": "claude-code-proxy/dev",
@@ -475,7 +475,7 @@ directory the auth tokens use, deliberately not `~/Library`) and at
 
 | Variable                 | Config key          | Default                                           | Purpose                                                                                                          |
 | ------------------------ | ------------------- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `PORT`                   | `port`              | `18765`                                           | Proxy listen port                                                                                                |
+| `PORT`                   | `port`              | `19080`                                           | Proxy listen port                                                                                                |
 | `XDG_STATE_HOME`         | —                   | `~/.local/state`                                  | Base dir for `proxy.log`                                                                                         |
 | `CCP_LOG_STDERR`         | `log.stderr`        | unset                                             | Also mirror log lines to stderr                                                                                  |
 | `CCP_LOG_VERBOSE`        | `log.verbose`       | unset                                             | Log full request/response bodies + every SSE event                                                               |

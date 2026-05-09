@@ -94,7 +94,7 @@ function usageAndExit(): never {
     .map((m) => `${m.model} (${m.provider})`)
     .join(", ")
   console.log(`Usage:
-  claude-code-proxy serve                      Run proxy (PORT env or config.json port, default 18765)
+  claude-code-proxy serve                      Run proxy (PORT env or config.json port, default 19080)
                                                Upstream is chosen per-request from ANTHROPIC_MODEL.
   claude-code-proxy <provider> auth login      Browser OAuth
   claude-code-proxy <provider> auth device     Device-code OAuth

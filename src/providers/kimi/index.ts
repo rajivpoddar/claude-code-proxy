@@ -14,8 +14,7 @@ import { KimiError, postKimi } from "./client.ts"
 import { runDeviceLogin } from "./auth/login.ts"
 import { persistInitialTokens } from "./auth/manager.ts"
 import { loadAuth, clearAuth, authPath } from "./auth/token-store.ts"
-
-const VERBOSE = !!process.env.CCP_LOG_VERBOSE
+import { logVerbose } from "../../config.ts"
 
 /**
  * Same context-overflow → HTTP 400 reactive-compact contract as the codex
@@ -75,7 +74,7 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
     stream: wantStream,
     requestedMaxTokens: body.max_tokens,
   })
-  if (VERBOSE) log.debug("anthropic request body", { body })
+  if (logVerbose()) log.debug("anthropic request body", { body })
 
   const resolvedModel = resolveModel(body.model)
   try {
@@ -109,7 +108,7 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
     thinking: translated.thinking?.type,
     maxTokens: translated.max_tokens,
   })
-  if (VERBOSE) log.debug("translated request body", { body: translated })
+  if (logVerbose()) log.debug("translated request body", { body: translated })
 
   let upstream
   try {
